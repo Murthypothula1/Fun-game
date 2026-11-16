@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Flappy Face</title>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;800&display=swap" rel="stylesheet">
+<style>
+  :root { --ink:#1d1b3a; --accent:#ff5d8f; --sun:#ffd166; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; background:#14122b; overflow:hidden; touch-action:manipulation;
+    font-family:'Baloo 2',system-ui,sans-serif; color:#fff; user-select:none; -webkit-user-select:none; }
+  #wrap { position:relative; height:100%; max-width:520px; margin:0 auto; }
+  canvas { display:block; width:100%; height:100%; }
+  .overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:14px; padding:24px; text-align:center; background:rgba(20,18,43,.45);
+    backdrop-filter:blur(2px); }
+  .hidden { display:none !important; }
+  h1 { font-size:clamp(40px,11vw,60px); line-height:.95; font-weight:800; color:var(--sun);
+    text-shadow:0 4px 0 var(--ink), 0 8px 20px rgba(0,0,0,.4); letter-spacing:1px; }
+  .sub { font-size:18px; opacity:.95; text-shadow:0 2px 0 var(--ink); }
+  .face-preview { width:120px; height:120px; border-radius:50%; border:5px solid #fff;
+    box-shadow:0 6px 0 var(--ink); background:#ffe0b5 center/cover no-repeat; animation:bob 1.2s ease-in-out infinite; }
+  @keyframes bob { 50% { transform:translateY(-10px) rotate(-6deg); } }
+  button, .btn { font:inherit; font-size:20px; font-weight:800; border:0; border-radius:16px; padding:12px 26px;
+    background:var(--accent); color:#fff; box-shadow:0 5px 0 #b8325c; cursor:pointer; min-width:200px; }
+  button:active, .btn:active { transform:translateY(3px); box-shadow:0 2px 0 #b8325c; }
+  .btn.secondary { background:#4cc9f0; box-shadow:0 5px 0 #2a8cae; font-size:16px; padding:10px 20px; }
+  input[type=text] { font:inherit; font-size:18px; padding:8px 14px; border-radius:12px; border:3px solid #fff;
+    width:220px; text-align:center; background:rgba(255,255,255,.95); color:var(--ink); }
+  .card { background:rgba(255,255,255,.95); color:var(--ink); border-radius:20px; padding:18px 28px;
+    box-shadow:0 6px 0 var(--ink); min-width:220px; }
+  .card .big { font-size:52px; font-weight:800; line-height:1; color:var(--accent); }
+  .card .row { display:flex; justify-content:space-between; gap:24px; font-size:18px; }
+  .medal { font-size:44px; }
+  .hint { font-size:14px; opacity:.8; }
+  #scoreHud { position:absolute; top:28px; left:0; right:0; text-align:center; font-size:64px; font-weight:800;
+    color:#fff; text-shadow:0 4px 0 var(--ink); pointer-events:none; }
+  #mute { position:absolute; top:12px; right:12px; min-width:0; padding:6px 12px; font-size:20px;
+    background:rgba(0,0,0,.25); box-shadow:none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="scoreHud" class="hidden">0</div>
+  <button id="mute" aria-label="Toggle sound">🔊</button>
+
+  <!-- Start screen -->
+  <div id="start" class="overlay">
+    <h1 id="title">FLAPPY<br>FACE</h1>
+    <div class="face-preview" id="preview"></div>
+    <input type="text" id="nameInput" maxlength="16" placeholder="Friend's name">
+    <label class="btn secondary">📸 Upload friend's face
+      <input type="file" id="faceInput" accept="image/*" hidden>
+    </label>
+    <button id="playBtn">PLAY</button>
+    <div class="hint">Tap / click / Space to fly</div>
+  </div>
+
+  <!-- Game over -->
+  <div id="over" class="overlay hidden">
+    <h1 style="font-size:44px">GAME OVER</h1>
+    <div class="sub" id="roast"></div>
+    <div class="card">
+      <div class="medal" id="medal"></div>
+      <div class="big" id="finalScore">0</div>
+      <div class="row"><span>Best</span><b id="bestScore">0</b></div>
+    </div>
+    <button id="againBtn">PLAY AGAIN</button>
+    <button id="menuBtn" class="btn secondary">Change face</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const $ = id => document.getElementById(id);
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  };
+
+  // ---------- Sizing (logical world is 360 wide, height follows aspect) ----------
+  const W = 360; let H = 640, scale = 1;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = r.width * dpr; canvas.height = r.height * dpr;
+    scale = canvas.width / W; H = canvas.height / scale;
+  }
+  window.addEventListener('resize', resize);
+
+  // ---------- Face ----------
+  // Priority: uploaded (localStorage) > friend.png in repo > drawn placeholder
+  const face = { img: null };
+  function setFace(src) {
+    const im = new Image();
+    im.onload = () => { face.img = im; $('preview').style.backgroundImage = `url(${src})`; };
+    im.src = src;
+  }
+  const saved = store.get('ff_face');
+  if (saved) setFace(saved);
+  else {
+    const def = new Image();
+    def.onload = () => { if (!face.img) setFace('friend.png'); };
+    def.src = 'friend.png';
+  }
+  $('faceInput').addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return;
+    const im = new Image();
+    im.onload = () => {
+      // center-crop to a square and shrink so it fits in localStorage
+      const s = Math.min(im.width, im.height), size = 256;
+      const c = document.createElement('canvas'); c.width = c.height = size;
+      c.getContext('2d').drawImage(im, (im.width - s) / 2, (im.height - s) / 2, s, s, 0, 0, size, size);
+      const url = c.toDataURL('image/jpeg', 0.85);
+      store.set('ff_face', url); setFace(url);
+      URL.revokeObjectURL(im.src);
+    };
+    im.src = URL.createObjectURL(file);
+  });
+
+  let friendName = store.get('ff_name') || '';
+  $('nameInput').value = friendName;
+  const updateTitle = () => {
+    const n = $('nameInput').value.trim();
+    $('title').innerHTML = n ? `FLYING<br>${n.toUpperCase().replace(/[<>&]/g, '')}` : 'FLAPPY<br>FACE';
+  };
+  updateTitle();
+  $('nameInput').addEventListener('input', () => { store.set('ff_name', $('nameInput').value.trim()); updateTitle(); });
+
+  // ---------- Sound (WebAudio, no files) ----------
+  let actx = null, muted = store.get('ff_mute') === '1';
+  $('mute').textContent = muted ? '🔇' : '🔊';
+  $('mute').addEventListener('click', e => { e.stopPropagation(); muted = !muted;
+    store.set('ff_mute', muted ? '1' : '0'); $('mute').textContent = muted ? '🔇' : '🔊'; });
+  function beep(freq, dur, type = 'square', vol = 0.08, slide = 0) {
+    if (muted) return;
+    try {
+      actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+      const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime;
+      o.type = type; o.frequency.setValueAtTime(freq, t);
+      if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), t + dur);
+      g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur);
+    } catch {}
+  }
+  const sfx = {
+    flap: () => beep(520, 0.12, 'triangle', 0.1, 300),
+    point: () => { beep(880, 0.08, 'square', 0.05); setTimeout(() => beep(1320, 0.12, 'square', 0.05), 70); },
+    hit: () => { beep(200, 0.35, 'sawtooth', 0.12, -150); },
+  };
+
+  // ---------- Game state ----------
+  const GRAV = 1500, FLAP = -420, SPEED = 150, GAP = 165, SPACING = 210, R = 24;
+  let state = 'menu', player, obstacles, clouds, score, best = +(store.get('ff_best') || 0), t = 0, shake = 0, particles = [];
+
+  function reset() {
+    player = { x: 100, y: H * 0.45, vy: 0, rot: 0 };
+    obstacles = []; score = 0; particles = [];
+    for (let i = 0; i < 3; i++) addObstacle(W + 120 + i * SPACING);
+  }
+  function addObstacle(x) {
+    const ground = H - 70, margin = 70;
+    const gapY = margin + GAP / 2 + Math.random() * (ground - margin * 2 - GAP);
+    const hue = [200, 280, 330, 160, 30][Math.floor(Math.random() * 5)];
+    obstacles.push({ x, gapY, w: 64, passed: false, hue });
+  }
+  clouds = Array.from({ length: 6 }, (_, i) => ({ x: i * 80, y: 40 + Math.random() * 220, s: 0.6 + Math.random() * 0.8 }));
+
+  function flap() {
+    if (state === 'play') { player.vy = FLAP; sfx.flap(); puff(); }
+    else if (state === 'ready') { state = 'play'; player.vy = FLAP; sfx.flap(); }
+  }
+  function puff() {
+    for (let i = 0; i < 5; i++) particles.push({ x: player.x - 14, y: player.y + 10,
+      vx: -60 - Math.random() * 60, vy: 40 + Math.random() * 60 - 30, life: 0.4, r: 3 + Math.random() * 4 });
+  }
+
+  function startGame() {
+    resize(); reset(); state = 'ready';
+    $('start').classList.add('hidden'); $('over').classList.add('hidden');
+    $('scoreHud').classList.remove('hidden'); $('scoreHud').textContent = '0';
+  }
+  const ROASTS = [
+    'Flew like a brick 🧱', 'Gravity: 1, {n}: 0', '{n} needs flying lessons', 'That pillar came out of nowhere, right?',
+    'Certified bird brain 🐦', '{n} has left the chat', 'Even a penguin flies better 🐧', 'So close… not really',
+  ];
+  function gameOver() {
+    state = 'dead'; sfx.hit(); shake = 0.3;
+    for (let i = 0; i < 18; i++) particles.push({ x: player.x, y: player.y, vx: (Math.random() - .5) * 400,
+      vy: (Math.random() - .5) * 400, life: 0.7, r: 3 + Math.random() * 5, star: true });
+    if (score > best) { best = score; store.set('ff_best', best); }
+    setTimeout(() => {
+      const n = $('nameInput').value.trim() || 'Your friend';
+      $('roast').textContent = ROASTS[Math.floor(Math.random() * ROASTS.length)].replace('{n}', n);
+      $('finalScore').textContent = score; $('bestScore').textContent = best;
+      $('medal').textContent = score >= 40 ? '🏆' : score >= 20 ? '🥇' : score >= 10 ? '🥈' : score >= 5 ? '🥉' : '💀';
+      $('scoreHud').classList.add('hidden'); $('over').classList.remove('hidden');
+      state = 'over';
+    }, 700);
+  }
+
+  // ---------- Input ----------
+  canvas.addEventListener('pointerdown', e => { e.preventDefault(); flap(); });
+  window.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.code === 'Space' || e.code === 'ArrowUp') {
+      e.preventDefault();
+      if (state === 'menu') startGame(); else if (state === 'over') startGame(); else flap();
+    }
+  });
+  $('playBtn').addEventListener('click', startGame);
+  $('againBtn').addEventListener('click', startGame);
+  $('menuBtn').addEventListener('click', () => { state = 'menu'; $('over').classList.add('hidden'); $('start').classList.remove('hidden'); });
+
+  // ---------- Update ----------
+  function update(dt) {
+    t += dt;
+    clouds.forEach(c => { c.x -= 12 * c.s * dt; if (c.x < -100) { c.x = W + 60; c.y = 40 + Math.random() * 220; } });
+    particles.forEach(p => { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; });
+    particles = particles.filter(p => p.life > 0);
+    if (shake > 0) shake -= dt;
+    if (!player) return;
+
+    if (state === 'ready' || state === 'menu') { player.y = H * 0.45 + Math.sin(t * 4) * 8; player.rot = 0; return; }
+    if (state === 'play' || state === 'dead') {
+      player.vy += GRAV * dt; player.y += player.vy * dt;
+      player.rot = Math.max(-0.5, Math.min(1.4, player.vy / 500));
+      const ground = H - 70;
+      if (player.y + R > ground) { player.y = ground - R; if (state === 'play') gameOver(); }
+      if (player.y < R) { player.y = R; player.vy = 0; }
+    }
+    if (state !== 'play') return;
+
+    const speed = SPEED + Math.min(score * 2, 70);
+    obstacles.forEach(o => {
+      o.x -= speed * dt;
+      if (!o.passed && o.x + o.w < player.x) { o.passed = true; score++; sfx.point(); $('scoreHud').textContent = score; }
+      // circle vs rect collision (slightly forgiving radius)
+      const r = R - 4;
+      for (const rect of [[o.x, -10, o.w, o.gapY - GAP / 2 + 10], [o.x, o.gapY + GAP / 2, o.w, H]]) {
+        const cx = Math.max(rect[0], Math.min(player.x, rect[0] + rect[2]));
+        const cy = Math.max(rect[1], Math.min(player.y, rect[1] + rect[3]));
+        if ((player.x - cx) ** 2 + (player.y - cy) ** 2 < r * r) { gameOver(); return; }
+      }
+    });
+    if (obstacles[0].x + obstacles[0].w < -10) {
+      obstacles.shift(); addObstacle(obstacles[obstacles.length - 1].x + SPACING);
+    }
+  }
+
+  // ---------- Draw ----------
+  let groundOff = 0;
+  function draw(dt) {
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    if (shake > 0) ctx.translate((Math.random() - .5) * 10, (Math.random() - .5) * 10);
+
+    // sunset sky
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#3a2c7a'); g.addColorStop(0.55, '#ff7aa2'); g.addColorStop(1, '#ffc47a');
+    ctx.fillStyle = g; ctx.fillRect(-10, -10, W + 20, H + 20);
+    // sun
+    ctx.fillStyle = 'rgba(255,230,140,.9)'; ctx.beginPath(); ctx.arc(W * 0.72, H * 0.42, 60, 0, 7); ctx.fill();
+    // distant hills
+    ctx.fillStyle = '#7b4fa8';
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 10) ctx.lineTo(x, H - 140 - Math.sin((x + t * 10) / 50) * 25 - Math.sin((x + t * 10) / 23) * 10);
+    ctx.lineTo(W, H); ctx.fill();
+    // clouds
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    clouds.forEach(c => { ctx.beginPath();
+      ctx.arc(c.x, c.y, 18 * c.s, 0, 7); ctx.arc(c.x + 20 * c.s, c.y - 8 * c.s, 22 * c.s, 0, 7);
+      ctx.arc(c.x + 42 * c.s, c.y, 16 * c.s, 0, 7); ctx.fill(); });
+
+    // obstacles: candy-striped towers
+    if (obstacles && state !== 'menu') obstacles.forEach(o => drawTower(o));
+
+    // ground
+    const ground = H - 70;
+    if (state === 'play' || state === 'ready') groundOff = (groundOff + (SPEED + Math.min((score||0) * 2, 70)) * dt) % 40;
+    ctx.fillStyle = '#3ddc97'; ctx.fillRect(0, ground, W, 16);
+    ctx.fillStyle = '#2bb57a';
+    for (let x = -groundOff; x < W + 40; x += 40) { ctx.beginPath(); ctx.moveTo(x, ground + 16); ctx.lineTo(x + 20, ground); ctx.lineTo(x + 40, ground + 16); ctx.fill(); }
+    ctx.fillStyle = '#d9a066'; ctx.fillRect(0, ground + 16, W, 70);
+    ctx.fillStyle = '#c48a52';
+    for (let x = -groundOff; x < W + 40; x += 40) ctx.fillRect(x + 6, ground + 32, 14, 6);
+
+    // particles
+    particles.forEach(p => {
+      ctx.globalAlpha = Math.max(0, p.life / 0.7);
+      ctx.fillStyle = p.star ? '#ffd166' : '#fff';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+
+    if (player && state !== 'menu') drawPlayer();
+    if (state === 'ready') {
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = '#1d1b3a'; ctx.lineWidth = 6; ctx.textAlign = 'center';
+      ctx.font = '800 30px "Baloo 2", sans-serif';
+      ctx.strokeText('TAP TO FLY!', W / 2, H * 0.3); ctx.fillText('TAP TO FLY!', W / 2, H * 0.3);
+    }
+  }
+
+  function drawTower(o) {
+    const top = o.gapY - GAP / 2, bot = o.gapY + GAP / 2, ground = H - 70;
+    const base = `hsl(${o.hue} 75% 60%)`, dark = `hsl(${o.hue} 60% 38%)`, light = `hsl(${o.hue} 90% 80%)`;
+    for (const [y, h, capY] of [[0, top, top - 22], [bot, ground - bot, bot]]) {
+      if (h <= 0) continue;
+      ctx.save(); ctx.beginPath(); ctx.rect(o.x + 6, y, o.w - 12, h); ctx.clip();
+      ctx.fillStyle = base; ctx.fillRect(o.x, y, o.w, h);
+      ctx.fillStyle = light;          // diagonal candy stripes
+      for (let s = y - o.w; s < y + h; s += 26) { ctx.beginPath();
+        ctx.moveTo(o.x, s); ctx.lineTo(o.x + o.w, s + o.w * 0.6); ctx.lineTo(o.x + o.w, s + o.w * 0.6 + 10); ctx.lineTo(o.x, s + 10); ctx.fill(); }
+      ctx.restore();
+      ctx.strokeStyle = dark; ctx.lineWidth = 3; ctx.strokeRect(o.x + 6, y, o.w - 12, h);
+      // rounded cap
+      ctx.fillStyle = base; ctx.beginPath(); ctx.roundRect(o.x, capY, o.w, 22, 10); ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.fillRect(o.x + 8, capY + 5, 8, 12);
+    }
+  }
+
+  function drawPlayer() {
+    const { x, y, rot } = player;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+    // wings flap
+    const wing = state === 'play' ? Math.sin(t * 30) * 0.6 : Math.sin(t * 10) * 0.4;
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#1d1b3a'; ctx.lineWidth = 2.5;
+    for (const side of [-1, 1]) {
+      ctx.save(); ctx.translate(-6, 4 * side * 0 + 2); ctx.rotate(side === -1 ? -0.4 - wing : 0.2 + wing * 0.3);
+      ctx.beginPath(); ctx.ellipse(-R + 2, 0, 16, 9, 0, 0, 7); ctx.fill(); ctx.stroke(); ctx.restore();
+      if (side === -1) break; // one visible wing behind
+    }
+    // face circle
+    ctx.save(); ctx.beginPath(); ctx.arc(0, 0, R, 0, 7); ctx.closePath();
+    ctx.fillStyle = '#ffe0b5'; ctx.fill(); ctx.clip();
+    if (face.img) ctx.drawImage(face.img, -R, -R, R * 2, R * 2);
+    else drawDefaultFace();
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, 7); ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke();
+    // front wing
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#1d1b3a'; ctx.lineWidth = 2.5;
+    ctx.save(); ctx.translate(-10, 6); ctx.rotate(0.3 - wing);
+    ctx.beginPath(); ctx.ellipse(-12, 0, 15, 8, 0, 0, 7); ctx.fill(); ctx.stroke(); ctx.restore();
+    // dizzy stars when dead
+    if (state === 'dead' || state === 'over') {
+      ctx.font = '16px sans-serif'; ctx.textAlign = 'center';
+      for (let i = 0; i < 3; i++) { const a = t * 6 + i * 2.1; ctx.fillText('⭐', Math.cos(a) * 26, -R - 6 + Math.sin(a) * 6); }
+    }
+    ctx.restore();
+  }
+  function drawDefaultFace() {
+    ctx.fillStyle = '#1d1b3a';
+    ctx.beginPath(); ctx.arc(-8, -5, 3.5, 0, 7); ctx.arc(8, -5, 3.5, 0, 7); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = '#1d1b3a'; ctx.beginPath(); ctx.arc(0, 4, 9, 0.2, Math.PI - 0.2); ctx.stroke();
+  }
+
+  // ---------- Loop ----------
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000); last = now;
+    update(dt); draw(dt);
+    requestAnimationFrame(loop);
+  }
+  resize(); reset(); requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
